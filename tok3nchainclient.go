@@ -1,24 +1,25 @@
 package main
 
 import (
-	"net/http"
-	"net/url"
+	"flag"
+	"github.com/onlyangel/apihandlers"
 	"io/ioutil"
 	"log"
-	"flag"
+	"net/http"
+	"net/url"
 
-	"encoding/json"
-	"github.com/tok3n/tok3nchain"
-	"fmt"
-	"os"
 	"bufio"
+	"encoding/json"
+	"fmt"
+	"github.com/crypt0cloud/core/model"
+	"os"
 
+	"bytes"
+	"crypto/sha256"
+	"encoding/base64"
 	"golang.org/x/crypto/ed25519"
 	"math/rand"
-	"encoding/base64"
-	"bytes"
 	"time"
-	"crypto/sha256"
 
 	"github.com/Pallinder/go-randomdata"
 	"strings"
@@ -29,16 +30,36 @@ var endpoint2 string
 var coordinator_endpoint string
 var appPrivateKey ed25519.PrivateKey
 var appPublicKey ed25519.PublicKey
+var cleanint bool
 
 
 func main() {
 	flag.StringVar(&endpoint1, "endpoint 1", "localhost:8081", "url of the endpoint 1")
 	flag.StringVar(&endpoint2, "endpoint 2", "localhost:8080", "url of the endpoint 2")
 	flag.StringVar(&coordinator_endpoint, "coordinator", "localhost:8080", "url of the coordinator endpoint")
+	flag.BoolVar(&cleanint,"clean",false,"clean instances")
 
 	flag.Parse()
 
 	reader := bufio.NewReader(os.Stdin)
+
+	if cleanint {
+		fmt.Printf("initting nodes")
+		reader.ReadString('\n')
+		node_clean(endpoint1)
+		node_clean(endpoint2)
+
+		fmt.Printf("Warmup nodes")
+		reader.ReadString('\n')
+		node_warmup(endpoint1)
+		node_warmup(endpoint2)
+
+		fmt.Printf("Setup nodes")
+		reader.ReadString('\n')
+		node_setup(endpoint1)
+		node_setup(endpoint2)
+	}
+
 
 	fmt.Printf("Initin coorinator\n")
 	reader.ReadString('\n')
@@ -178,22 +199,45 @@ func main() {
 */
 
 
+
+}
+
+func node_clean(url string){
+	_, err := getRemote("http://"+url+"/ws/clean" )
+	if err != nil{
+		panic(err)
+	}
+}
+func node_warmup(url string){
+	_, err := getRemote("http://"+url+"/ws/warm" )
+	if err != nil{
+		panic(err)
+	}
+}
+func node_setup(url string){
+	_, err := getRemote("http://"+url+"/api/setup/configure_endpoint?endpoint="+url )
+	if err != nil{
+		panic(err)
+	}
 }
 
 func coordinator_init(coordinator string)([]byte, []byte, error){
 	appPublicKey, appPrivateKey, err := ed25519.GenerateKey(rand.New(rand.NewSource(time.Now().UnixNano())))
 	if err != nil{
-		return nil, nil, err
+		panic(err)
 	}
 
 	base64content := base64.StdEncoding.EncodeToString(appPublicKey)
 	returned, err := getRemote("http://"+coordinator+"/api/v1/coord/register_masterkey?url="+coordinator_endpoint+"&key="+url.QueryEscape( base64content) )
 	if err != nil{
-		return nil, nil, err
+		panic(err)
 	}
 
-	if returnedstr := string(returned); returnedstr != "OK" {
-		return nil, nil, fmt.Errorf(returnedstr)
+	myerror := new(apihandlers.ErrorType)
+	json.Unmarshal(returned,myerror)
+
+	if myerror.Error != "" {
+		return nil, nil, fmt.Errorf(myerror.Error)
 	}
 
 	return appPublicKey, appPrivateKey, nil
@@ -245,8 +289,8 @@ func coordinator_addNode(coordinator_private []byte, node string)(string, error)
 	}
 
 }
-
-func signAndSend_SignRequest(transaction *tok3nchain.Transaction_Serializable, user_public,user_private []byte, endpoint string)(*tok3nchain.Transaction_Serializable,error){
+/*
+func signAndSend_SignRequest(transaction *model.Transaction, user_public,user_private []byte, endpoint string)(*model.Transaction,error){
 	fmt.Printf("Sign Request\n")
 	jsonstr, err := json.Marshal(transaction)
 	if err != nil{
@@ -388,32 +432,28 @@ func createContract(app_public,app_private,user_public,user_private []byte, endp
 
 	return transaction, err
 }
+*/
 
-func createUser(endpoint string) (*tok3nchain.Transaction_Serializable,error,[]byte,[]byte) {
+func createUser(endpoint string) (*model.Transaction,error,[]byte,[]byte) {
 	fmt.Printf("Creating new User\n")
-	block, err := getBlock(endpoint)
-	if err != nil {
-		return nil, err, nil, nil
-	}
+	nodeID := GetRemoteNodeCredentials(endpoint)
 
-	appPublicKey, appPrivateKey, err = ed25519.GenerateKey(rand.New(rand.NewSource(time.Now().UnixNano())))
-	if err != nil{
-		return nil, err, nil, nil
-	}
+	appPublicKey, appPrivateKey, err := ed25519.GenerateKey(rand.New(rand.NewSource(time.Now().UnixNano())))
+	apihandlers.PanicIfNotNil(err)
 
 	sha_256 := sha256.New()
 
 
-	transaction := new(tok3nchain.Transaction_Serializable)
+	transaction := new(model.Transaction)
 	transaction.SignerKinds = []string{"NewUser"}
 	transaction.SignKind = "NewUser"
 	transaction.AppID = base64.StdEncoding.EncodeToString(appPublicKey)
-	transaction.Parent = 0
+	transaction.Parent = ""
 	transaction.Callback = "http://localhost:8081"
 	transaction.Payload = randomdata.Email()
 
-	transaction.BlockId = block.IdVal
-	transaction.Block = block.Hash
+	transaction.FromNode = *nodeID
+	transaction.ToNode = *nodeID
 	transaction.Creation = time.Now().UnixNano()
 
 
@@ -447,14 +487,12 @@ func createUser(endpoint string) (*tok3nchain.Transaction_Serializable,error,[]b
 	return transaction, err, appPublicKey, appPrivateKey
 }
 
-func createAPP(endpoint string, coord_publ, coord_priv []byte) (*tok3nchain.Transaction_Serializable,error, []byte, []byte) {
+func createAPP(endpoint string, coord_publ, coord_priv []byte) (*model.Transaction,error, []byte, []byte) {
 	fmt.Printf("Creating new App\n")
-	block, err := getBlock(endpoint)
-	if err != nil {
-		return nil, err, nil, nil
-	}
 
-	appPublicKey, appPrivateKey, err = ed25519.GenerateKey(rand.New(rand.NewSource(time.Now().UnixNano())))
+	nodeID := GetRemoteNodeCredentials(endpoint)
+
+	appPublicKey, appPrivateKey, err := ed25519.GenerateKey(rand.New(rand.NewSource(time.Now().UnixNano())))
 	if err != nil{
 		return nil, err, nil, nil
 	}
@@ -462,17 +500,18 @@ func createAPP(endpoint string, coord_publ, coord_priv []byte) (*tok3nchain.Tran
 	sha_256 := sha256.New()
 
 
-	transaction := new(tok3nchain.Transaction_Serializable)
+	transaction := new(model.Transaction)
 	transaction.SignerKinds = []string{"NewApp"}
 	transaction.SignKind = "NewApp"
 	transaction.AppID = base64.StdEncoding.EncodeToString(appPublicKey)
-	transaction.Parent = 0
+	transaction.Parent = ""
 	transaction.Callback = "http://localhost:8081"
 	transaction.Payload = "Test app1"
 	transaction.OriginatorURl = ""
 
-	transaction.BlockId = block.IdVal
-	transaction.Block = block.Hash
+	transaction.FromNode = *nodeID
+	transaction.ToNode = *nodeID
+
 	transaction.Creation = time.Now().UnixNano()
 
 
@@ -508,7 +547,7 @@ func createAPP(endpoint string, coord_publ, coord_priv []byte) (*tok3nchain.Tran
 	return transaction, err, appPublicKey, appPrivateKey
 }
 
-
+/*
 func getBlock(endpoint string) (*tok3nchain.Block_Serializable,error) {
 	response, err := callRemote("http://"+endpoint+"/api/v1/last_block")
 
@@ -522,7 +561,7 @@ func getBlock(endpoint string) (*tok3nchain.Block_Serializable,error) {
 		return nil, err
 	}
 	return block, nil
-}
+}*/
 
 func callRemote(url string)([]byte, error){
 	res, err := http.Get(url)
@@ -553,7 +592,7 @@ func postRemote(url string, data []byte)([]byte, error){
 func getRemote(url string)([]byte, error){
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return nil, err
+		panic(err)
 	}
 	client := &http.Client{}
 	resp, err := client.Do(req)
@@ -564,4 +603,16 @@ func getRemote(url string)([]byte, error){
 	defer resp.Body.Close()
 
 	return body, nil
+}
+
+func GetRemoteNodeCredentials( endpoint string) *model.NodeIdentification {
+	//TODO: CHANGE URL WHEN BLOCK CHANGES
+	response, err := getRemote( "http://"+endpoint+"/api/v1/node_id")
+	apihandlers.PanicIfNotNil(err)
+
+	nodeI := new(model.NodeIdentification)
+	err = json.Unmarshal(response, nodeI)
+	apihandlers.PanicIfNotNil(err)
+
+	return nodeI
 }
